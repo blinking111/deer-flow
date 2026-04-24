@@ -4,6 +4,8 @@ Dockerfile
 .git
 .gitignore
 docker/
+!docker/sandbox/
+!docker/sandbox/**
 
 # Python
 __pycache__/

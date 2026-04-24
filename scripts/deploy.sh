@@ -58,6 +58,8 @@ cd "$REPO_ROOT"
 
 DOCKER_DIR="$REPO_ROOT/docker"
 COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+DEFAULT_SANDBOX_IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+CUSTOM_SANDBOX_IMAGE="deer-flow-sandbox-features-tool:latest"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -176,6 +178,58 @@ detect_sandbox_mode() {
     fi
 }
 
+get_configured_sandbox_image() {
+    local sandbox_image=""
+
+    [ -f "$DEER_FLOW_CONFIG_PATH" ] || { echo "$DEFAULT_SANDBOX_IMAGE"; return; }
+
+    sandbox_image=$(awk '
+        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
+        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
+        in_sandbox && /^[[:space:]]*image:[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]*image:[[:space:]]*/, "", line)
+            gsub(/["'\'']/, "", line)
+            print line
+            exit
+        }
+    ' "$DEER_FLOW_CONFIG_PATH")
+
+    if [ -n "$sandbox_image" ]; then
+        echo "$sandbox_image"
+    else
+        echo "$DEFAULT_SANDBOX_IMAGE"
+    fi
+}
+
+build_custom_sandbox_image() {
+    local sandbox_image="$1"
+
+    echo -e "${BLUE}Building sandbox image: $sandbox_image ...${NC}"
+    echo ""
+    docker build \
+        -f "$DOCKER_DIR/sandbox/Dockerfile" \
+        -t "$sandbox_image" \
+        "$REPO_ROOT"
+}
+
+ensure_sandbox_image_ready() {
+    local sandbox_image="$1"
+
+    if [ "$sandbox_image" = "$CUSTOM_SANDBOX_IMAGE" ]; then
+        build_custom_sandbox_image "$sandbox_image"
+        return
+    fi
+
+    if ! docker image inspect "$sandbox_image" >/dev/null 2>&1; then
+        echo -e "${BLUE}Pulling sandbox image: $sandbox_image ...${NC}"
+        echo ""
+        docker pull "$sandbox_image"
+    else
+        echo -e "${GREEN}Sandbox image already exists locally: $sandbox_image${NC}"
+    fi
+}
+
 # ── down ──────────────────────────────────────────────────────────────────────
 
 if [ "$CMD" = "down" ]; then
@@ -205,6 +259,12 @@ if [ "$CMD" = "build" ]; then
         export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
     fi
 
+    sandbox_mode="$(detect_sandbox_mode)"
+    if [ "$sandbox_mode" != "local" ]; then
+        export SANDBOX_IMAGE="$(get_configured_sandbox_image)"
+        ensure_sandbox_image_ready "$SANDBOX_IMAGE"
+    fi
+
     "${COMPOSE_CMD[@]}" build
 
     echo ""
@@ -229,6 +289,10 @@ echo ""
 
 sandbox_mode="$(detect_sandbox_mode)"
 echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
+if [ "$sandbox_mode" != "local" ]; then
+    export SANDBOX_IMAGE="$(get_configured_sandbox_image)"
+    echo -e "${BLUE}Sandbox image: $SANDBOX_IMAGE${NC}"
+fi
 
 echo -e "${BLUE}Runtime mode: $RUNTIME_MODE${NC}"
 
@@ -261,6 +325,8 @@ if [ "$sandbox_mode" != "local" ]; then
     else
         echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
     fi
+
+    ensure_sandbox_image_ready "$SANDBOX_IMAGE"
 fi
 
 echo ""

@@ -11,6 +11,8 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DOCKER_DIR="$PROJECT_ROOT/docker"
+DEFAULT_SANDBOX_IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+CUSTOM_SANDBOX_IMAGE="deer-flow-sandbox-features-tool:latest"
 
 # Docker Compose command with project name
 COMPOSE_CMD="docker compose -p deer-flow-dev -f docker-compose-dev.yaml"
@@ -84,14 +86,87 @@ docker_available() {
     return 0
 }
 
+get_configured_sandbox_image() {
+    local config_file="$PROJECT_ROOT/config.yaml"
+    local sandbox_image=""
+
+    if [ ! -f "$config_file" ]; then
+        echo "$DEFAULT_SANDBOX_IMAGE"
+        return
+    fi
+
+    sandbox_image=$(awk '
+        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
+        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
+        in_sandbox && /^[[:space:]]*image:[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]*image:[[:space:]]*/, "", line)
+            gsub(/["'\'']/, "", line)
+            print line
+            exit
+        }
+    ' "$config_file")
+
+    if [ -n "$sandbox_image" ]; then
+        echo "$sandbox_image"
+    else
+        echo "$DEFAULT_SANDBOX_IMAGE"
+    fi
+}
+
+build_custom_sandbox_image() {
+    local sandbox_image="$1"
+
+    echo -e "${BLUE}Building sandbox image: $sandbox_image ...${NC}"
+    echo ""
+    docker build \
+        -f "$DOCKER_DIR/sandbox/Dockerfile" \
+        -t "$sandbox_image" \
+        "$PROJECT_ROOT"
+}
+
+ensure_sandbox_image_ready() {
+    local sandbox_image="$1"
+
+    if [ "$sandbox_image" = "$CUSTOM_SANDBOX_IMAGE" ]; then
+        build_custom_sandbox_image "$sandbox_image"
+        return
+    fi
+
+    if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${sandbox_image}$"; then
+        echo -e "${BLUE}Pulling sandbox image: $sandbox_image ...${NC}"
+        echo ""
+
+        if ! docker pull "$sandbox_image" 2>&1; then
+            echo ""
+            echo -e "${YELLOW}⚠ Failed to pull sandbox image.${NC}"
+            echo ""
+            echo "This is expected if:"
+            echo "  1. You are using local sandbox mode (default — no image needed)"
+            echo "  2. You are behind a corporate proxy or firewall"
+            echo "  3. The registry requires authentication"
+            echo ""
+            echo -e "${GREEN}The Docker development environment can still be started.${NC}"
+            echo "If you need AIO sandbox (container-based execution):"
+            echo "  - Ensure you have network access to the registry"
+            echo "  - Or configure a custom sandbox image in config.yaml"
+            echo ""
+            echo -e "${YELLOW}Next step: make docker-start${NC}"
+            return 1
+        fi
+    else
+        echo -e "${GREEN}Sandbox image already exists locally: $sandbox_image${NC}"
+    fi
+}
+
 # Initialize: pre-pull the sandbox image so first Pod startup is fast
 init() {
     echo "=========================================="
-    echo "  DeerFlow Init — Pull Sandbox Image"
+    echo "  DeerFlow Init — Prepare Sandbox Image"
     echo "=========================================="
     echo ""
 
-    SANDBOX_IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+    SANDBOX_IMAGE="$(get_configured_sandbox_image)"
 
     # Detect sandbox mode from config.yaml
     local sandbox_mode
@@ -116,29 +191,12 @@ init() {
         return 0
     fi
 
-    if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${SANDBOX_IMAGE}$"; then
-        echo -e "${BLUE}Pulling sandbox image: $SANDBOX_IMAGE ...${NC}"
-        echo ""
-
-        if ! docker pull "$SANDBOX_IMAGE" 2>&1; then
-            echo ""
-            echo -e "${YELLOW}⚠ Failed to pull sandbox image.${NC}"
-            echo ""
-            echo "This is expected if:"
-            echo "  1. You are using local sandbox mode (default — no image needed)"
-            echo "  2. You are behind a corporate proxy or firewall"
-            echo "  3. The registry requires authentication"
-            echo ""
-            echo -e "${GREEN}The Docker development environment can still be started.${NC}"
-            echo "If you need AIO sandbox (container-based execution):"
-            echo "  - Ensure you have network access to the registry"
-            echo "  - Or configure a custom sandbox image in config.yaml"
-            echo ""
-            echo -e "${YELLOW}Next step: make docker-start${NC}"
-            return 0
+    if ! ensure_sandbox_image_ready "$SANDBOX_IMAGE"; then
+        if [ "$SANDBOX_IMAGE" = "$CUSTOM_SANDBOX_IMAGE" ]; then
+            echo -e "${YELLOW}✗ Failed to build configured custom sandbox image: $SANDBOX_IMAGE${NC}"
+            exit 1
         fi
-    else
-        echo -e "${GREEN}Sandbox image already exists locally: $SANDBOX_IMAGE${NC}"
+        return 0
     fi
 
     echo ""
@@ -167,6 +225,7 @@ start() {
     echo ""
 
     sandbox_mode="$(detect_sandbox_mode)"
+    SANDBOX_IMAGE="$(get_configured_sandbox_image)"
 
     if $gateway_mode; then
         services="frontend gateway nginx"
@@ -189,6 +248,9 @@ start() {
     else
         echo -e "${BLUE}Provisioner disabled (not required for this sandbox mode).${NC}"
     fi
+    if [ "$sandbox_mode" = "aio" ] || [ "$sandbox_mode" = "provisioner" ]; then
+        echo -e "${BLUE}Sandbox image: $SANDBOX_IMAGE${NC}"
+    fi
     echo ""
     
     # Set DEER_FLOW_ROOT for provisioner if not already set
@@ -197,6 +259,7 @@ start() {
         echo -e "${BLUE}Setting DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
         echo ""
     fi
+    export SANDBOX_IMAGE
     
     # Ensure config.yaml exists before starting.
     if [ ! -f "$PROJECT_ROOT/config.yaml" ]; then
@@ -236,6 +299,15 @@ start() {
     if $gateway_mode; then
         export LANGGRAPH_UPSTREAM=gateway:8001
         export LANGGRAPH_REWRITE=/api/
+    fi
+
+    if [ "$sandbox_mode" = "aio" ] || [ "$sandbox_mode" = "provisioner" ]; then
+        if ! ensure_sandbox_image_ready "$SANDBOX_IMAGE"; then
+            if [ "$SANDBOX_IMAGE" = "$CUSTOM_SANDBOX_IMAGE" ]; then
+                echo -e "${YELLOW}✗ Failed to build configured custom sandbox image: $SANDBOX_IMAGE${NC}"
+                exit 1
+            fi
+        fi
     fi
 
     echo "Building and starting containers..."

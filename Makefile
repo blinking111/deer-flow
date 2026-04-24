@@ -42,7 +42,7 @@ help:
 	@echo "  make down            - Stop and remove production Docker containers"
 	@echo ""
 	@echo "Docker Development Commands:"
-	@echo "  make docker-init     - Pull the sandbox image"
+	@echo "  make docker-init     - Prepare the sandbox image (build custom image or pull configured image)"
 	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
 	@echo "  make docker-start-pro - Start Docker in Gateway mode (experimental, no LangGraph container)"
 	@echo "  make docker-stop     - Stop Docker development services"
